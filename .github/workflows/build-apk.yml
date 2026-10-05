@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: "zulu"
           java-version: "21"
@@ -155,7 +155,14 @@ jobs:
           for f in apk-output/*.apk; do
             [ -e "$f" ] || continue
             echo "### $(basename "$f")"
-            "$APKSIGNER" verify --print-certs --verbose "$f" 2>&1 | grep -Ei "Verifies|DN:|SHA-256 digest|SHA-1 digest|Signer #|WARNING" | head -20
+            OUT=$("$APKSIGNER" verify --print-certs --verbose "$f" 2>&1 | grep -Ei "Verifies|DN:|SHA-256 digest|SHA-1 digest|Signer #|WARNING" | head -20)
+            echo "$OUT"
+            {
+              echo "### 🔏 $(basename "$f")"
+              echo '```'
+              echo "$OUT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             echo ""
           done
 
