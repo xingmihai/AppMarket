@@ -1,7 +1,8 @@
 name: Build APK
 
-# 不依赖任何 Secrets：仓库缺少签名密钥时，Release 变体会自动回退到 debug 签名，
-# 因此 Fork 之后无需配置任何密钥即可直接产出可安装的 APK。
+# 零配置即可运行：检测到仓库配置了签名 Secrets（SIGNING_KEY / KEY_STORE_PASSWORD /
+# ALIAS / KEY_PASSWORD）时，Release 变体使用正式签名；否则自动回退到 debug 签名，
+# 保证 Fork 之后无需任何密钥也能产出 APK。密钥仅存在于 GitHub Secrets，从不入库。
 on:
   workflow_dispatch:
     inputs:
@@ -37,7 +38,10 @@ permissions:
   contents: read
 
 env:
-  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  # 显式保留 UTF-8，确保中文别名在 JVM 内正确解码。
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dfile.encoding=UTF-8"
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
 
 jobs:
   build:
@@ -80,11 +84,46 @@ jobs:
 
       # 未配置 KEYSTORE_PATH 时，app/android 的 release 变体会回退到 debug 签名配置，
       # 因此 assembleRelease 在无密钥环境下同样可以构建成功。
+      # 只判断 Secrets 是否齐全并输出布尔值，任何密钥内容都不会进入日志。
+      - name: Resolve signing configuration
+        id: signing
+        run: |
+          if [ -n "${{ secrets.SIGNING_KEY }}" ] && [ -n "${{ secrets.KEY_STORE_PASSWORD }}" ] \
+             && [ -n "${{ secrets.ALIAS }}" ] && [ -n "${{ secrets.KEY_PASSWORD }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo ">> signing secrets detected"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo ">> no signing secrets, release will fall back to the debug signing config"
+          fi
+
+      # 密钥写在 $RUNNER_TEMP（仓库工作区之外），构建结束即随 runner 销毁。
+      - name: Decode Signing Key
+        if: steps.signing.outputs.available == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          echo "$SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+          test -s "$RUNNER_TEMP/keystore.jks" && echo ">> keystore decoded"
+
       - name: Build APK
+        env:
+          SECRET_KEYSTORE_PASS: ${{ secrets.KEY_STORE_PASSWORD }}
+          SECRET_ALIAS: ${{ secrets.ALIAS }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew
           TYPE="${{ inputs.build_type || 'debug' }}"
           echo "Build type: $TYPE"
+          # Release 需要正式签名；debug 变体始终使用 Android 默认 debug 密钥。
+          if [ "${{ steps.signing.outputs.available }}" = "true" ] \
+             && { [ "$TYPE" = "release" ] || [ "$TYPE" = "both" ]; }; then
+            export KEYSTORE_PATH="$RUNNER_TEMP/keystore.jks"
+            export KEYSTORE_PASS="$SECRET_KEYSTORE_PASS"
+            export KEY_ALIAS="$SECRET_ALIAS"
+            export KEY_PASSWORD="$SECRET_KEY_PASSWORD"
+            echo ">> release build will be signed with the configured keystore"
+          fi
           case "$TYPE" in
             debug)   ./gradlew :app:android:assembleDebug --stacktrace ;;
             release) ./gradlew :app:android:assembleRelease --stacktrace ;;
