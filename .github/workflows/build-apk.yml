@@ -144,6 +144,21 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # 打印签名者证书指纹，确认 APK 确实由配置的密钥签署。
+      - name: Verify APK signature
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | head -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo ">> apksigner not available, skipped"
+            exit 0
+          fi
+          for f in apk-output/*.apk; do
+            [ -e "$f" ] || continue
+            echo "### $(basename "$f")"
+            "$APKSIGNER" verify --print-certs --verbose "$f" 2>&1 | grep -Ei "Verifies|DN:|SHA-256 digest|SHA-1 digest|Signer #|WARNING" | head -20
+            echo ""
+          done
+
       - name: Write Build Summary
         run: |
           {
