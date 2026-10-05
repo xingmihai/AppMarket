@@ -1,0 +1,114 @@
+name: Build APK
+
+# 不依赖任何 Secrets：仓库缺少签名密钥时，Release 变体会自动回退到 debug 签名，
+# 因此 Fork 之后无需配置任何密钥即可直接产出可安装的 APK。
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "构建类型"
+        required: true
+        default: "debug"
+        type: choice
+        options:
+          - debug
+          - release
+          - both
+      run_desktop_check:
+        description: "同时编译校验桌面端与公共共享模块"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**.md"
+      - ".github/**"
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - "**.md"
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+jobs:
+  build:
+    name: Assemble APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 可选：编译公共模块 + 桌面端，用于确认改动没有破坏跨平台共享代码。
+      - name: Compile desktop & shared modules
+        if: ${{ inputs.run_desktop_check }}
+        run: ./gradlew :app:shared:compileKotlinDesktop --stacktrace
+
+      # 未配置 KEYSTORE_PATH 时，app/android 的 release 变体会回退到 debug 签名配置，
+      # 因此 assembleRelease 在无密钥环境下同样可以构建成功。
+      - name: Build APK
+        run: |
+          chmod +x ./gradlew
+          TYPE="${{ inputs.build_type || 'debug' }}"
+          echo "Build type: $TYPE"
+          case "$TYPE" in
+            debug)   ./gradlew :app:android:assembleDebug --stacktrace ;;
+            release) ./gradlew :app:android:assembleRelease --stacktrace ;;
+            both)    ./gradlew :app:android:assembleDebug :app:android:assembleRelease --stacktrace ;;
+          esac
+
+      - name: Collect APKs
+        run: |
+          mkdir -p apk-output
+          find app/android/build/outputs/apk -type f -name '*.apk' -exec cp {} apk-output/ \;
+          ls -lh apk-output
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppMarket-APK-${{ github.run_number }}
+          path: apk-output/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Write Build Summary
+        run: |
+          {
+            echo "## 📦 APK 构建结果"
+            echo ""
+            echo "| APK | 大小 | SHA256 |"
+            echo "| --- | --- | --- |"
+            for f in apk-output/*.apk; do
+              [ -e "$f" ] || continue
+              echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) | \`$(sha256sum "$f" | awk '{print $1}')\` |"
+            done
+            echo ""
+            echo "构建类型：\`${{ inputs.build_type || 'debug' }}\` · 提交：\`${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
